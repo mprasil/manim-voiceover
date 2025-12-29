@@ -1,5 +1,6 @@
 import os
 import sys
+import time
 from pathlib import Path
 
 from dotenv import find_dotenv, load_dotenv
@@ -183,7 +184,6 @@ class AzureService(SpeechService):
         speech_service.synthesis_word_boundary.connect(
             lambda evt: word_boundaries.append(process_event(evt))
         )
-        speech_synthesis_result = speech_service.speak_ssml_async(ssml).get()
 
         json_dict = {
             "input_text": text,
@@ -193,31 +193,43 @@ class AzureService(SpeechService):
             "original_audio": audio_path,
         }
 
-        if (
-            speech_synthesis_result.reason
-            == speechsdk.ResultReason.SynthesizingAudioCompleted
-        ):
-            pass
-        elif speech_synthesis_result.reason == speechsdk.ResultReason.Canceled:
-            cancellation_details = speech_synthesis_result.cancellation_details
-            logger.error(
-                "Speech synthesis canceled: {}".format(cancellation_details.reason)
-            )
-            if cancellation_details.reason == speechsdk.CancellationReason.Error:
-                if cancellation_details.error_details:
-                    logger.error(
-                        "Error details: {}".format(cancellation_details.error_details)
-                    )
-                    if "authentication" in cancellation_details.error_details.lower():
-                        logger.error(
-                            "The authentication credentials are invalid. Please check the environment variables AZURE_SUBSCRIPTION_KEY and AZURE_SERVICE_REGION."
-                        )
-                        logger.info(
-                            "Would you like to enter new values for the variables in the .env file? [Y/n]"
-                        )
-                        if input().lower() in ["y", "yes", ""]:
-                            create_dotenv_azure()
+        sleep_time = 5
+        for retry in range(1, 11):
+            speech_synthesis_result = speech_service.speak_ssml_async(ssml).get()
 
-            raise Exception("Speech synthesis failed")
+            if (
+                speech_synthesis_result.reason
+                == speechsdk.ResultReason.SynthesizingAudioCompleted
+            ):
+                break
+            elif speech_synthesis_result.reason == speechsdk.ResultReason.Canceled:
+                cancellation_details = speech_synthesis_result.cancellation_details
+                logger.error(
+                    "Speech synthesis canceled: {}".format(cancellation_details.reason)
+                )
+                if cancellation_details.reason == speechsdk.CancellationReason.Error:
+                    if cancellation_details.error_details:
+                        logger.error(
+                            "Error details: {}".format(cancellation_details.error_details)
+                        )
+
+                        # Retry on rate limit
+                        if "429" in cancellation_details.error_details:
+                            logger.info("Attempt #{} failed, retrying".format(retry))
+                            time.sleep(sleep_time)
+                            sleep_time = min(3000, sleep_time * 2)
+                            continue
+
+                        if "authentication" in cancellation_details.error_details.lower():
+                            logger.error(
+                                "The authentication credentials are invalid. Please check the environment variables AZURE_SUBSCRIPTION_KEY and AZURE_SERVICE_REGION."
+                            )
+                            logger.info(
+                                "Would you like to enter new values for the variables in the .env file? [Y/n]"
+                            )
+                            if input().lower() in ["y", "yes", ""]:
+                                create_dotenv_azure()
+
+                raise Exception("Speech synthesis failed")
 
         return json_dict
